@@ -1,0 +1,428 @@
+---
+title: "results"
+format: html
+editor: visual
+---
+
+```{r setup, include=FALSE}
+library('here')
+
+knitr::opts_knit$set(root.dir = here())
+```
+
+```{r imports, include=FALSE}
+library(tidymodels)
+library(data.table)
+library(dbarts)
+library(gt)
+library(ggthemes)
+library(ggforce)
+library(ParBayesianOptimization)
+source('paper_rcode/random_forest.R')
+source('paper_rcode/ri_bart.R')
+```
+
+```{r basic_definitions, include=FALSE}
+set.seed(1780)
+cei <- fread('data_output/datos_6to_bruno.csv')
+cei_split <- initial_split(cei, prop = 0.80, strata = aprobado)
+cei_train <- training(cei_split) 
+cei_test <- testing(cei_split) 
+
+#Create a list with the different dataframes that correspond to different month.
+dfs <- list()
+for(i in 3:11){
+  j <- i+1
+  # Remove columns whose names end with a number between j and 12.
+  regex <- paste0(paste(j:12, collapse = "$|"),"$")
+  dfs[[i-2]] <- list(cei_train |> select(!matches(regex)),
+                     cei_test |> select(!matches(regex)))
+}
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, eval=FALSE}
+varinfo <- data.frame(  
+  variables=colnames(dfs[[1]][[1]]), 
+  description = c(
+    "id_persona"                        ,
+    "departamento"                      ,
+    "zona"                              ,
+    "contexto_sociocultural"            ,
+    "id_centro"                         ,
+    "nivel"                             ,
+    "puntos"                            ,
+    "actividades_acumuladas_3"          ,
+    "preguntas_acumuladas_3"            ,
+    "correctas_acumuladas_3"            ,
+    "intenta.prom_3"                    ,
+    "activ.prom_3"                      ,
+    "pregu.prom_3"                      ,
+    "pts.min_3"                         ,
+    "pts.max_3"                         ,
+    "acierto_3"                         ,
+    "dias_acumulados_3"                 ,
+    "intentos_acumulados_3"             ,
+    "actividades_asignadas_acumuladas_3",
+    "porc_actividades_hechas_3"         ,
+    "mensajes_enviados_acumulados_3"    ,
+    "mensajes_recibidos_acumulados_3"   ,
+    "mensajes_hilos_acumulados_3"       ,
+    "class_lb_3"                        ,
+    "aprobado"  
+  )# cierra descripcion
+  )# cierra data.frame
+
+gt(varinfo)
+
+```
+
+# Data exploration
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# datos_long_modelo.csv es  creado en modelo_predictivo.R
+# confirmar es consistente con datos_6to_bruno.csv
+cei_long <- read.csv(here('data_output/datos_long_modelo.csv') )
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+cei |> 
+  mutate(xx = 'h', Level = factor(nivel, levels=c("B1","A2.2", "A2.1", "A1.2", "A1.1", "Pre-A.1") ), Grade =6 ) |>  
+  #with(table(nivel, Level, useNA = 'always' ))
+  ggplot(  ) + geom_sina(aes(x=Grade, y=puntos, colour=Level, group=Grade), size=.5)+
+  scale_color_viridis_d() + labs(x='') + 
+  theme_bw() + 
+  theme(aspect.ratio = 1/2, axis.text.y = element_blank()) + 
+  coord_flip() + labs(colour = "Level", y = 'English test points') +
+  guides(color = guide_legend(override.aes = list(size = 3))) 
+
+#ggsave(filename = 'data_output/grade.pdf', height = 7, width = 7)
+```
+
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+cei_long |> 
+  filter( Grado == 6) |> 
+  mutate( nivel.ord = reorder(nivel, -puntos, mean) ) |> 
+  group_by(Contexto_Sociocultural, mes) |> 
+  summarise( correctas = mean(correctas.acu), dias=mean(dias.acu),
+             acierto=mean(acierto), 
+             intenta.total = sum(intenta.total)) |> 
+  ggplot() + 
+  geom_line(aes(x = mes, y=intenta.total, color = Contexto_Sociocultural ),
+            linewidth=1, alpha=.75) + 
+  #facet_grid(~ Grado, scale='free_y', labeller = label_both) + 
+  labs(y = 'Total attemps', x = 'Month', color = '') + 
+  scale_colour_brewer(palette = 'RdYlBu') +
+  #theme_bw() +
+  scale_x_continuous(breaks = 3:12) + 
+  theme(legend.position = 'bottom')
+
+#ggsave(filename = 'data_output/attempt_6.pdf', height = 7, width = 7)
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+cei_long |> 
+  filter( Grado == 6) |> 
+  mutate( nivel.ord = reorder(nivel, -puntos, mean) ) |> 
+  group_by(Grado, Contexto_Sociocultural, mes, nivel.ord) |> 
+  summarise( correctas = mean(correctas.acu), dias=mean(dias.acu), acierto=mean(acierto) ) |> 
+  ggplot() + 
+  geom_line(aes(x = mes, y=correctas, color = nivel.ord ), linewidth=1.5, alpha=.75) + 
+  facet_wrap(~Contexto_Sociocultural) + 
+  labs(color = '', x='Month', y='Correct answers') + 
+  #scale_color_brewer(palette = 'RdYlBu') + 
+  scale_color_viridis_d()+
+  scale_x_continuous(breaks = 3:12) + 
+  theme_bw() + 
+  theme(aspect.ratio = 2/3, 
+        legend.position = "inside", legend.position.inside = c(.99, 0.01),
+            legend.justification = c("right", "bottom"),  # Anchor to bottom right
+    legend.direction = "horizontal",   # Horizontal layout
+    legend.box = "horizontal",         # Allow horizontal wrapping
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  ) +
+  guides(
+    colour = guide_legend(nrow = 3, byrow = TRUE)  # 2 rows
+  )
+
+#ggsave(filename = 'data_output/LB_perf.pdf', height = 7, width = 7)
+```
+
+
+# Model Performance evolution
+
+## Effect of cut-point month
+
+First we measure how the performance of the models changes when we change the break-point.
+
+```{r load_results, echo=FALSE, warning=FALSE, message=FALSE}
+getResults <- function(model){
+  f <- NULL
+  if(model == 'rf') 
+    f <- function(train, test) random_forest(train, test)
+  else if(model == 'rf_default')
+    f <- function(train, test) random_forest(train, test, default = T)
+  else if(model == 'riBART')
+    f <- function(train, test) ri_bart(train, test)
+  else if(model == 'riBART_default')
+    f <- function(train, test) ri_bart(train, test, default = T)
+  else
+    warning("No model matches")
+  
+  #List with the predictions of the different months
+  results <- lapply(dfs, function(x){
+    f(train = x[[1]], test = x[[2]]) #Return predictions (class probability)
+  })
+  
+  
+  results <- as.data.frame(results)
+  col_names <- sapply(3:11, function(x) paste0(x))
+  colnames(results) <- col_names
+  
+  results <- cei_test |>
+    select(aprobado) |>
+    mutate(aprobado = factor(aprobado,  levels=c(1,0))) |>
+    cbind(results)
+  
+  results_class <- results |> 
+      mutate(across(2:10, function(x) if_else(x < .5, 0, 1))) |>
+      mutate(across(2:10, function(x) factor(x,  levels=c(1,0))))
+  
+  met <- metric_set(accuracy, sens, spec) #Define metrics that will be used.
+  
+  result_metrics <- lapply(col_names, function(x){
+      class_metrics <- results_class |> met(truth = aprobado, estimate = x)
+      prob_metrics  <- results |> roc_auc(aprobado, x)
+      
+      class_metrics |>
+            rbind(prob_metrics) |>
+            mutate(month = c(x), model = model) |>
+            select(-c(.estimator)) |>
+            pivot_wider(names_from = .metric, values_from = .estimate) 
+  })
+  
+  result_metrics <- map_dfr(result_metrics, bind_rows) 
+}
+
+rf <- getResults('rf')
+rf_default <- getResults('rf_default')
+riBART <- getResults('riBART')
+riBART_default <- getResults('riBART_default')
+combined_metrics <- rbind(rf, rf_default, riBART, riBART_default) |> 
+                      pivot_longer(!c(month, model), names_to = 'metric', values_to = 'value') |>
+                      mutate(month = as.integer(month))
+```
+
+```{r plot_results, echo=FALSE}
+
+combined_metrics |>
+  separate(model, into=c('model', 'param') ) |>
+  mutate(param = replace_na(param, 'optimal') ) |>
+  filter(metric == 'roc_auc') |>
+  ggplot(aes(x = month, y = value, color = model, linetype = param)) +
+  geom_line() +
+  geom_point(size = .5) +
+  labs(x = "Month", y = "", color = "", linetype = "Hyperpar") +
+  scale_x_continuous(breaks= seq(3, 11, by=1)) +
+  scale_y_continuous( limits = c(.5, .85) ) +
+  scale_color_manual( values = c('#d01c8b', '#4dac26') ) +
+  theme_bw()
+
+#ggsave(filename = 'paper_results/output/fig_AUC.png', height = 7, width = 7)
+
+```
+
+## Results of the selected month
+
+Now we will focus on the model's result after cutting the data at a specific month.
+
+```{r define_selected_month}
+selected_month <- 5
+```
+
+### Metrics
+
+```{r metrics, echo=FALSE}
+metrics_selected_month <- combined_metrics |> 
+  filter(model %in% c('rf','riBART') & month == selected_month) |>
+  select(-month) |>
+  pivot_wider(names_from = model, values_from = value)
+
+tt <- metrics_selected_month |> 
+  gt() |> 
+  cols_label(
+    metric = "Measure",
+    rf = "RF",
+    riBART = "BART"
+  ) |> 
+  fmt_number(
+    columns = c('rf' , 'riBART' ),
+    decimals = 2,
+    use_seps = FALSE
+  ) |> 
+  tab_caption(caption = "Performance measures with data up to May")
+  
+
+#gtsave( tt, filename = 'paper_results/output/tab-perf.tex')
+```
+
+### ROC Curve
+
+```{r roc, echo=FALSE, fig.height=8}
+roc_rf <- random_forest_roc(test = dfs[[selected_month - 2]][[2]], selected_month)
+roc_bart <- ribart_roc(test = dfs[[selected_month - 2]][[2]], selected_month)
+
+roc_combinadas <- data.frame(
+  spec_1 = c(1 - roc_rf$specificity, 1 - roc_bart$specificity),
+  sens = c(roc_rf$sensitivity, roc_bart$sensitivity),
+  Model = c(rep("Random Forest", length(roc_rf$sensitivity)), rep("riBART", length(roc_bart$sensitivity)))
+)
+
+ggplot(roc_combinadas, aes(x = spec_1, y = sens, color = Model)) +
+  geom_line() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+  labs(x = "1 - Specificity",
+       y = "Sensitivity",
+       color = "Model") +
+  scale_color_manual(values = c("Random Forest" = "blue", "riBART" = "red")) +
+  theme(
+    aspect.ratio = 1,
+    axis.text = element_text(size = 16), 
+    axis.title = element_text(size = 18),
+    legend.text = element_text(size = 13),
+    legend.title = element_text(size =14),
+    legend.position = "top"
+  )
+```
+
+### Random effects
+
+```{r random_effects, echo=FALSE}
+selected_month2 <- 5
+plot_random_effects(cei, selected_month2)
+
+#ggsave(filename = 'paper_results/output/fig_raneff.png', height = 7, width = 7)
+```
+
+### Prob to reach the expected english level by soc context and LB use
+
+```{r lb_use, echo=FALSE, warning=FALSE, fig.height=8, eval=FALSE}
+prob_quantile_activity(
+  train = dfs[[selected_month2 - 2]][[1]], 
+  test = dfs[[selected_month2 - 2]][[2]], 
+  selected_month2)
+```
+
+```{r lb_use_nacho, echo=FALSE, warning=FALSE, fig.height=8}
+
+# no funciona la funcion, a ver si lo copio todo aca y lo voy arrelgando
+
+
+# Set up a syntethic data set ---------------
+#--------------------------------------------
+      # list(
+      #   mean = ~ifelse(is.integer(.), round(quantile(., 0.5)), quantile(., 0.5)),
+      #   d90  = ~ifelse(is.integer(.), round(quantile(., 0.9)), quantile(., 0.9)),
+      #   d10  = ~ifelse(is.integer(.), round(quantile(., 0.1)), quantile(., 0.1))
+      # )
+
+syntethic_students <-   
+  bind_rows( dfs[[selected_month2 - 2]][[1]], dfs[[selected_month2 - 2]][[2]] ) |>
+    select(-id_persona, -starts_with("class_lb_")) |>
+    summarise(across(
+      where(is.numeric), 
+      list(
+        mean = ~ifelse(is.integer(.), round(quantile(., 0.5)), quantile(., 0.5)),
+        d90  = ~ifelse(is.integer(.), round(quantile(., 0.9)), quantile(., 0.9)),
+        d10  = ~ifelse(is.integer(.), round(quantile(., 0.1)), quantile(., 0.1))
+      )
+    )) |>
+    pivot_longer(
+      everything(), 
+      names_to = c("variable", ".value"), 
+      names_pattern = "(.*)_(.*)"
+    ) |> 
+    column_to_rownames(var = "variable") |> 
+    t() |> 
+    as_tibble()
+  
+  syntethic_students$id_persona <- c(1, 2, 3)
+  syntethic_students$departamento <- rep("MONTEVIDEO", 3)
+  syntethic_students$zona <- rep("Urbana", 3)
+  syntethic_students$id_centro <-  c("1261", "1261", "1261")
+  syntethic_students$aprobado <- c(0,0,0) #Dummy values
+  syntethic_students$nivel <- rep('A2.1', 3) #Dummy values
+  syntethic_students[paste0("class_lb_", 3:selected_month2)] <- lapply(3:selected_month2, function(x) rep(1016, 3))
+  
+  syntethic_students <- syntethic_students |> 
+    mutate_at(vars(id_persona, 
+                   aprobado, 
+                   contains("acumu"), 
+                   starts_with("class_lb_"),
+    ), as.integer)
+
+qqs <- paste(rep('Quintil', 5), 1:5)  
+
+syntethic_students <- map_dfr(1:5, ~ mutate(syntethic_students, rep = .x)) |> 
+  mutate(contexto_sociocultural = rep(qqs, each=3))
+
+#Reorder syntethic_students to match test
+zz.names <- colnames(dfs[[selected_month2 - 2]][[1]])
+syntethic_students <- syntethic_students[, zz.names]   
+
+
+# Fit bart mdoel with same options  ---------------
+#--------------------------------------------
+best_params <- readRDS(file = here(paste0("models/hyperparameters/", "riBART_",selected_month2)))
+
+cei_train_bart <- dfs[[selected_month2 - 2]][[1]] |> 
+      select(-c(puntos,nivel, id_persona)) |> 
+      mutate(id_centro = as.factor(id_centro))
+    
+cei_test_bart  <-rbind( dfs[[selected_month2 - 2]][[2]], syntethic_students)  |> 
+    select(-c(puntos,nivel, id_persona)) |> 
+    mutate(id_centro = as.factor(id_centro))
+    
+rbartFit_2 <-  rbart_vi(aprobado ~ . - id_centro, 
+                            data = cei_train_bart,test = cei_test_bart, 
+                            group.by = id_centro, group.by.test = id_centro,
+                            power = best_params$power, base = best_params$base,
+                            k = best_params$k,  n.trees = best_params$n.tree,
+                            keepTrees = TRUE, keepCall = TRUE, keepTestFits = TRUE,
+                            seed = 1784)
+
+    
+
+# Obtain results and plot  ---------------    
+#--------------------------------------------    
+    #rbartFit_2$yhat.test
+    
+#cei_test_bart[ 568:582, ] |> View()
+
+    rr <- extract(rbartFit_2, type = 'ev', sample = 'test', combineChains = TRUE)
+    
+    prob_quantiles <- data.frame(decile = c("p50", "p90", "p10"), 
+                                 contexto = rep(qqs, each=3), 
+                                 prob = apply(rr[, 568:582], 2, mean),
+                    desv = apply(rr[, 568:582], 2, sd))
+  
+  ggplot(prob_quantiles, aes(x = contexto, y = prob, color = decile, group = decile)) + 
+    geom_point(position = position_dodge(.5)) + geom_line(position = position_dodge(.5)) +
+    geom_errorbar(aes(ymin = prob - desv, ymax = prob + desv),
+                  width = 0.2, alpha = 0.7, linewidth = 1,position = position_dodge(.5)) +
+    labs(x = "Socioeconomic context (Quintiles)",
+         y = "Prob. to reach A2.1",
+         color = "LB_use") +
+    scale_x_discrete(labels = c("Quintil 1" = "Q1",
+                                "Quintil 2" = "Q2",
+                                "Quintil 3" = "Q3",
+                                "Quintil 4" = "Q4",
+                                "Quintil 5" = "Q5")) +
+    scale_color_colorblind() + 
+    theme_bw()
+  
+  ggsave(filename = 'paper_results/output/fig_percentiles.png', height = 7, width = 7)
+```
